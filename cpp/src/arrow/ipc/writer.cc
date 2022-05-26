@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <iostream>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -575,12 +576,13 @@ class DictionarySerializer : public RecordBatchSerializer {
 
 Status WriteIpcPayload(const IpcPayload& payload, const IpcWriteOptions& options,
                        io::OutputStream* dst, int32_t* metadata_length) {
+  auto start = std::chrono::high_resolution_clock::now();
+  auto startPos = dst->Tell();
   RETURN_NOT_OK(WriteMessage(*payload.metadata, options, dst, metadata_length));
 
 #ifndef NDEBUG
   RETURN_NOT_OK(CheckAligned(dst));
 #endif
-
   // Now write the buffers
   for (size_t i = 0; i < payload.body_buffers.size(); ++i) {
     const std::shared_ptr<Buffer>& buffer = payload.body_buffers[i];
@@ -601,7 +603,15 @@ Status WriteIpcPayload(const IpcPayload& payload, const IpcWriteOptions& options
       RETURN_NOT_OK(dst->Write(kPaddingBytes, padding));
     }
   }
+  auto stop = std::chrono::high_resolution_clock::now();
 
+  auto endPos = dst->Tell();
+  std::cout << "buffer diff" << std::endl;
+  std::cout << endPos.ValueOrDie() - startPos.ValueOrDie() << std::endl;
+
+  auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+  std::cout << "write time:" << std::endl;
+  std::cout << duration.count() << std::endl;
 #ifndef NDEBUG
   RETURN_NOT_OK(CheckAligned(dst));
 #endif
@@ -650,6 +660,26 @@ Status WriteRecordBatch(const RecordBatch& batch, int64_t buffer_start_offset,
   IpcPayload payload;
   RecordBatchSerializer assembler(buffer_start_offset, NULLPTR, options, &payload);
   RETURN_NOT_OK(assembler.Assemble(batch));
+
+
+//    auto start = std::chrono::high_resolution_clock::now();
+//
+//    std::string writeString(1000000, 'a');
+//    RETURN_NOT_OK(dst->Write(writeString.c_str(), 1000000));
+//
+//    RETURN_NOT_OK(dst->Write(writeString.c_str(), 1000000));
+//    RETURN_NOT_OK(dst->Write(writeString.c_str(), 1000000));
+//
+//    auto mid = std::chrono::high_resolution_clock::now();
+//    std::string writeString2(3000000, 'a');
+//    RETURN_NOT_OK(dst->Write(writeString2.c_str(), 3000000));
+//    auto stop = std::chrono::high_resolution_clock::now();
+//    auto singDuration = std::chrono::duration_cast<std::chrono::microseconds>(stop - mid);
+////    auto multDuration = std::chrono::duration_cast<std::chrono::microseconds>(mid - start);
+//
+//    std::cout << "test write speed" << std::endl;
+//    std::cout << singDuration.count() << std::endl;
+//    std::cout << multDuration.count() << std::endl;
 
   // TODO: it's a rough edge that the metadata and body length here are
   // computed separately

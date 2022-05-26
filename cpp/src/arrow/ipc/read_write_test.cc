@@ -26,6 +26,7 @@
 
 #include <flatbuffers/flatbuffers.h>
 #include <gtest/gtest.h>
+#include <list>
 
 #include "arrow/array.h"
 #include "arrow/array/builder_primitive.h"
@@ -54,6 +55,8 @@
 #include "arrow/util/key_value_metadata.h"
 
 #include "generated/Message_generated.h"  // IWYU pragma: keep
+#include "arrow/array/builder_nested.h"
+#include "arrow/array/builder_binary.h"
 
 namespace arrow {
 
@@ -517,6 +520,207 @@ class TestIpcRoundTrip : public ::testing::TestWithParam<MakeRecordBatch*>,
     ASSERT_EQ(expected_version, message->metadata_version());
   }
 };
+
+#define ABORT_ON_FAILURE(expr)                     \
+  do {                                             \
+    arrow::Status status_ = (expr);                \
+    if (!status_.ok()) {                           \
+      std::cerr << status_.message() << std::endl; \
+      abort();                                     \
+    }                                              \
+  } while (0);
+
+TEST(TestIpcRoundTrip, BasicSerialization) {
+
+    auto vecStart = std::chrono::high_resolution_clock::now();
+    auto schema = arrow::schema({
+                                        {field("a", arrow::int64())},
+                                        {field("b", arrow::float64())}
+                                });
+    std::shared_ptr<arrow::Array> array_a;
+    std::shared_ptr<arrow::Array> array_b;
+    arrow::NumericBuilder<arrow::Int64Type> builder;
+    arrow::NumericBuilder<arrow::FloatType> float_builder;
+    auto size = 100000;
+
+    for (int i = 0; i < size; i++) {
+        ABORT_ON_FAILURE(builder.Append(i));
+        ABORT_ON_FAILURE(float_builder.Append(i* 0.1));
+    }
+    ABORT_ON_FAILURE(builder.Finish(&array_a));
+    ABORT_ON_FAILURE(float_builder.Finish(&array_b));
+
+    auto batch = RecordBatch::Make(schema, size, {array_a, array_b});
+//
+//    auto batch = RecordBatchFromJSON(schema,
+//                                     R"([{"a": "12.3", "b": "12.34"},
+//                                 {"a": "45.6", "b": "12.34"},
+//                                 {"a": "12.3", "b": "-12.34"},
+//                                 {"a": "-12.3", "b": null},
+//                                 {"a": "-12.3", "b": "-45.67"}
+//                                 ])");
+//    std::cout<< batch->ToString() << std::endl;
+    auto start = std::chrono::high_resolution_clock::now();
+    auto w_opts = arrow::ipc::IpcWriteOptions::Defaults();
+    auto res = arrow::ipc::SerializeRecordBatch(*batch, w_opts);
+
+    auto post_ser = std::chrono::high_resolution_clock::now();
+    arrow::io::BufferReader reader (res.ValueOrDie());
+
+    auto r_opts = arrow::ipc::IpcReadOptions::Defaults();
+    auto res1 = arrow::ipc::ReadRecordBatch(schema, nullptr, r_opts, &reader);
+
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto createDuration = std::chrono::duration_cast<std::chrono::microseconds>(start - vecStart);
+    auto serDuration = std::chrono::duration_cast<std::chrono::microseconds>(post_ser - start);
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+    std::cout << "creation, just ser, ser + deser" << std::endl;
+    std::cout << createDuration.count() << std::endl;
+    std::cout << serDuration.count() << std::endl;
+    std::cout << duration.count() << std::endl;
+    std::cout<< res1.ValueOrDie()->ToString() << std::endl;
+}
+
+TEST(TestIpcRoundTrip, StringSerialization) {
+
+    auto vecStart = std::chrono::high_resolution_clock::now();
+    auto schema = arrow::schema({
+                                        {field("a", arrow::utf8())}
+                                });
+    std::shared_ptr<arrow::Array> array_a;
+    arrow::StringBuilder builder;
+    auto size = 1000;
+
+    for (int i = 0; i < size; i++) {
+//        ABORT_ON_FAILURE(builder.Append("([{\"a\": \"12.3\", \"b\": \"12.34\"},"
+//                                        "{\"a\": \"45.6\", \"b\": \"12.34\"},"
+//                                        "{\"a\": \"12.3\", \"b\": \"-12.34\"},"
+//                                        "{\"a\": \"-12.3\", \"b\": null},"
+//                                        "{\"a\": \"-12.3\", \"b\": \"-45.67\"}])"));
+        ABORT_ON_FAILURE(builder.Append("{\"a\": \"12.3\", \"b\": \"12.34\"}"));
+    }
+    ABORT_ON_FAILURE(builder.Finish(&array_a));
+
+    auto batch = RecordBatch::Make(schema, size, {array_a});
+    auto start = std::chrono::high_resolution_clock::now();
+    auto w_opts = arrow::ipc::IpcWriteOptions::Defaults();
+    auto res = arrow::ipc::SerializeRecordBatch(*batch, w_opts);
+
+    auto post_ser = std::chrono::high_resolution_clock::now();
+    arrow::io::BufferReader reader (res.ValueOrDie());
+
+    auto r_opts = arrow::ipc::IpcReadOptions::Defaults();
+    auto res1 = arrow::ipc::ReadRecordBatch(schema, nullptr, r_opts, &reader);
+
+    auto stop = std::chrono::high_resolution_clock::now();
+    auto createDuration = std::chrono::duration_cast<std::chrono::microseconds>(start - vecStart);
+    auto serDuration = std::chrono::duration_cast<std::chrono::microseconds>(post_ser - start);
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+    std::cout << "creation, just ser, ser + deser" << std::endl;
+    std::cout << createDuration.count() << std::endl;
+    std::cout << serDuration.count() << std::endl;
+    std::cout << duration.count() << std::endl;
+//    std::cout<< res1.ValueOrDie()->ToString() << std::endl;
+}
+
+TEST(TestIpcRoundTrip, ArraySerialization) {
+
+    auto size = 100000;
+    auto vecStart = std::chrono::high_resolution_clock::now();
+    auto schema = arrow::schema({
+                                        {field("a", arrow::list(int64()))}
+                                });
+    std::shared_ptr<arrow::Array> array_a;
+
+    auto builder = std::make_shared<arrow::NumericBuilder<arrow::Int64Type>>();
+    arrow::ListBuilder list_builder(default_memory_pool(), builder);
+
+    for (int i = 0; i < size; i++) {
+        for (int j =0; j < i % 5; j++) {
+            ABORT_ON_FAILURE(builder->Append(j));
+        }
+        ABORT_ON_FAILURE(list_builder.Append());
+    }
+
+    ABORT_ON_FAILURE(list_builder.Finish(&array_a));
+
+    auto batch = RecordBatch::Make(schema, size, {array_a});
+
+//    std::cout<< batch->ToString() << std::endl;
+    auto start = std::chrono::high_resolution_clock::now();
+
+    auto w_opts = arrow::ipc::IpcWriteOptions::Defaults();
+    auto res = arrow::ipc::SerializeRecordBatch(*batch, w_opts);
+
+    auto post_ser = std::chrono::high_resolution_clock::now();
+
+    arrow::io::BufferReader reader (res.ValueOrDie());
+
+    auto r_opts = arrow::ipc::IpcReadOptions::Defaults();
+    auto res1 = arrow::ipc::ReadRecordBatch(schema, nullptr, r_opts, &reader);
+
+    auto stop = std::chrono::high_resolution_clock::now();
+
+    auto createDuration = std::chrono::duration_cast<std::chrono::microseconds>(start - vecStart);
+    auto serDuration = std::chrono::duration_cast<std::chrono::microseconds>(post_ser - start);
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+
+    std::cout << "creation, just ser, ser + deser" << std::endl;
+    std::cout << createDuration.count() << std::endl;
+    std::cout << serDuration.count() << std::endl;
+    std::cout << duration.count() << std::endl;
+    std::cout<< res1.ValueOrDie()->ToString() << std::endl;
+}
+
+TEST(TestIpcRoundTrip, MapSerialization) {
+
+    auto size = 1000000;
+//    auto vecStart = std::chrono::high_resolution_clock::now();
+    auto schema = arrow::schema({
+                                        {field("a", arrow::list(int64()))}
+                                });
+    std::shared_ptr<arrow::Array> array_a;
+
+    auto key_builder = std::make_shared<arrow::NumericBuilder<arrow::Int64Type>>();
+    auto item_builder = std::make_shared<arrow::NumericBuilder<arrow::Int64Type>>();
+    arrow::MapBuilder map_builder(default_memory_pool(), key_builder, item_builder);
+
+    for (int i = 0; i < size; i++) {
+        for (int j =0; j < i % 5; j++) {
+            ABORT_ON_FAILURE(key_builder->Append(j));
+            ABORT_ON_FAILURE(item_builder->Append(j*2));
+        }
+        ABORT_ON_FAILURE(map_builder.Append());
+    }
+
+    ABORT_ON_FAILURE(map_builder.Finish(&array_a));
+
+    auto batch = RecordBatch::Make(schema, size, {array_a});
+
+//    std::cout<< batch->ToString() << std::endl;
+//    auto start = std::chrono::high_resolution_clock::now();
+
+    auto w_opts = arrow::ipc::IpcWriteOptions::Defaults();
+    auto res = arrow::ipc::SerializeRecordBatch(*batch, w_opts);
+
+//    auto post_ser = std::chrono::high_resolution_clock::now();
+
+    arrow::io::BufferReader reader (res.ValueOrDie());
+
+    auto r_opts = arrow::ipc::IpcReadOptions::Defaults();
+    auto res1 = arrow::ipc::ReadRecordBatch(schema, nullptr, r_opts, &reader);
+
+//    auto stop = std::chrono::high_resolution_clock::now();
+//
+//    auto createDuration = std::chrono::duration_cast<std::chrono::microseconds>(start - vecStart);
+//    auto serDuration = std::chrono::duration_cast<std::chrono::microseconds>(post_ser - start);
+//    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+//
+//    std::cout << "creation, just ser, ser + deser" << std::endl;
+//    std::cout << createDuration.count() << std::endl;
+//    std::cout << serDuration.count() << std::endl;
+//    std::cout << duration.count() << std::endl;
+}
 
 TEST_P(TestIpcRoundTrip, RoundTrip) {
   std::shared_ptr<RecordBatch> batch;
